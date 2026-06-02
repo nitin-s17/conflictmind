@@ -1,0 +1,26 @@
+# Environment variables — never commit these
+.env
+
+# Virtual environment — too large, not needed
+venv/
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+
+# Pytest cache
+.pytest_cache/
+
+# VS Code settings
+.vscode/
+
+# Test files we don't need in repo
+test_retrieve.py
+test_conflicts.py
+test_decay.py
+test_utils.py
+
+# Windows files
+Thumbs.db
+desktop.ini
