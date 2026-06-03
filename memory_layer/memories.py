@@ -91,7 +91,7 @@ from bson  import ObjectId
 from memory_layer.db import get_memories_collection, get_conflict_pairs_collection
 from memory_layer.embeddings import get_embedding
 
-def write_memory(content: str, memory_type: str, conversation_id: str) -> str:
+def write_memory(content: str, memory_type: str, conversation_id: str, auto_detect: bool = True) -> str:
     """
     Converts text to an embedding and stores it as a memory in Atlas.
     
@@ -131,17 +131,17 @@ def write_memory(content: str, memory_type: str, conversation_id: str) -> str:
     
     new_memory_id = str(result.inserted_id)
     print(f"Memory written: {new_memory_id}")
-
     # Check if this new memory conflicts with any existing memories
-    conflicts = detect_conflicts(new_memory_id, content, memory_type)
-    for conflict in conflicts:
-        save_conflict_pair(
-            memory_a_id=new_memory_id,
-            memory_b_id=conflict["_id"],
-            memory_a_content=content,
-            memory_b_content=conflict["content"],
-            similarity_score=conflict["similarity_score"]
-        )
+    if auto_detect:
+        conflicts = detect_conflicts(new_memory_id, content, memory_type)
+        for conflict in conflicts:
+            save_conflict_pair(
+                memory_a_id=new_memory_id,
+                memory_b_id=conflict["_id"],
+                memory_a_content=content,
+                memory_b_content=conflict["content"],
+                similarity_score=conflict["similarity_score"]
+            )
 
     return new_memory_id
 
