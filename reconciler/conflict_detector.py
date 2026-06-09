@@ -10,7 +10,7 @@ import time
 import threading
 from reconciler.conflict_classifier import classify_conflict
 
-CONFLICT_CONFIDENCE_THRESHOLD = 0.75
+CONFLICT_CONFIDENCE_THRESHOLD = 0.85
 
 
 def detect_conflicts(new_memory: dict, existing_memories: list[dict]) -> list[dict]:

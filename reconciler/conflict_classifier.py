@@ -31,9 +31,11 @@ Confidence: {confidence_b}
 Times recalled: {frequency_b}
 
 Determine their relationship. Rules:
-- "contradictory" = they cannot both be true at the same time, or one directly conflicts with the other
+- "contradictory" = they DIRECTLY conflict on the EXACT SAME TOPIC (e.g. "hates spicy food" vs "loves spicy food"). Both memories must be about the identical subject.
 - "redundant" = they express the same core fact or preference, possibly with different wording
-- "unrelated" = they are about different aspects of the user and can coexist without conflict
+- "unrelated" = they are about DIFFERENT topics or aspects of the user. If the two memories cover different subjects (food vs response style, career vs hobbies, coding vs personality), they are ALWAYS unrelated — even if they seem related.
+
+IMPORTANT: When in doubt, classify as "unrelated". Only classify as "contradictory" if you are absolutely certain both memories make opposing claims about the exact same thing.
 
 Respond with ONLY this JSON:
 {{
@@ -41,7 +43,6 @@ Respond with ONLY this JSON:
   "confidence": <float 0.0-1.0, how confident you are in this classification>,
   "reason": "<one sentence explanation>"
 }}"""
-
 
 def classify_conflict(memory_a: dict, memory_b: dict) -> dict:
     """

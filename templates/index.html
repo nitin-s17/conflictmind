@@ -1206,7 +1206,7 @@ const CFG = {
    STATE
  ═══════════════════════════════════════════════════════════ */
 const S = {
-  conversationId:  `conv_${Date.now()}`,
+  conversationId: localStorage.getItem('conflictmind_conv_id') || `conv_${Date.now()}`,
   isSending:       false,
   currentFilter:   'all',
   knownConflictIds: new Set(),
@@ -1316,6 +1316,7 @@ const Chat = {
     // Custom new chat button logic
     document.getElementById('btn-new-chat').addEventListener('click', () => {
       S.conversationId = `conv_${Date.now()}`;
+      localStorage.setItem('conflictmind_conv_id', S.conversationId);
       const msgs = document.getElementById('chat-messages');
       msgs.innerHTML = `
         <div id="welcome-screen">
@@ -1353,6 +1354,7 @@ const Chat = {
 
     const thinkEl = this._addThinking();
     try {
+      localStorage.setItem('conflictmind_conv_id', S.conversationId);
       const res  = await fetch('/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1367,8 +1369,16 @@ const Chat = {
         this._addAIBubble(data.response, data.memories_used || [], data.new_memory);
         if (data.new_memory) {
           fireMemoryOrb();
-          Toast.show(`Memory stored: "${data.new_memory.content.slice(0,60)}…"`, 'memory');
-          setTimeout(() => Memories.refresh(), 800);
+          Toast.show(`Memory stored: "${data.new_memory.content.slice(0, 60)}…"`, 'memory');
+          setTimeout(() => {
+            Memories.refresh();
+            Graph.refresh();
+          }, 800);
+        } else {
+          setTimeout(() => {
+            Memories.refresh();
+            Graph.refresh();
+          }, 800);
         }
       }
     } catch(e) {
@@ -2211,8 +2221,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.getElementById('btn-toggle-convs').addEventListener('click', () => Conversations.toggle());
 
-  setInterval(() => Graph.refresh(),    CFG.GRAPH_REFRESH);
-  setInterval(() => Memories.refresh(), CFG.MEMORY_REFRESH);
+  // setInterval(() => Graph.refresh(),    CFG.GRAPH_REFRESH);
+  // setInterval(() => Memories.refresh(), CFG.MEMORY_REFRESH);
 
   window.addEventListener('resize', () => Graph._updateSize());
 });

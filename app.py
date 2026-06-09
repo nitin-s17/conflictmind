@@ -1,6 +1,6 @@
 """
 app.py — ConflictMind Flask Application
-Person 3 (B) — Agent conversation loop + API server + UI
+Agent conversation loop + API server + UI
 
 Endpoints:
     GET  /                → serves the chat + memory graph UI
@@ -164,7 +164,8 @@ Return NONE or the memory sentence:"""
             memory_id = ml.write_memory(
                 content=extracted,
                 memory_type=memory_type,
-                conversation_id=conversation_id
+                conversation_id=conversation_id,
+                auto_detect=False
             )
 
             new_memory_data = {
