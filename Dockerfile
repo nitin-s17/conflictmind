@@ -5,12 +5,14 @@ RUN apt-get update && apt-get install -y curl && \
     apt-get install -y nodejs && \
     apt-get clean
 
+# Pre-install the MCP server globally at build time
+RUN npm install -g mongodb-mcp-server
+
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt --no-cache-dir
 COPY . .
 RUN chmod +x /app/startup.sh
-RUN which adk && adk --version || echo "adk not in PATH, using python -m"
 
 EXPOSE 8080
 CMD ["/app/startup.sh"]

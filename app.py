@@ -239,6 +239,20 @@ def debug_adk():
         results["list_apps"] = {"error": str(e)}
     return jsonify(results)
 
+@app.route("/store-memory", methods=["POST"])
+def store_memory():
+    data = request.get_json()
+    content = data.get("content", "").strip()
+    memory_type = data.get("memory_type", "semantic")
+    conversation_id = data.get("conversation_id", "agent")
+    if not content:
+        return jsonify({"error": "content required"}), 400
+    try:
+        memory_id = ml.write_memory(content, memory_type, conversation_id)
+        return jsonify({"memory_id": memory_id, "stored": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    
 if __name__ == "__main__":
     print("\nConflictMind starting...")
     print("    http://localhost:8080\n")

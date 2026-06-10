@@ -1,51 +1,49 @@
 """
 background_worker.py
-Person 2 — Day 7 deliverable.
-
 Polls Atlas for pending conflicts every 30 seconds and runs the debate loop.
-Run this as a separate process alongside the Flask server.
-
-Usage:
-    python background_worker.py
 """
 
 import time
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'Conflict Mind'))
+import traceback
 
 from dotenv import load_dotenv
 load_dotenv()
 
-from reconciler import adversarial_reconcile
+print("[worker] Starting imports...", flush=True)
+
+try:
+    from reconciler.reconciler import adversarial_reconcile
+    print("[worker] reconciler imported OK", flush=True)
+except Exception as e:
+    print(f"[worker] Import failed: {e}", flush=True)
+    traceback.print_exc()
+    sys.exit(1)
 
 POLL_INTERVAL_SECONDS = 30
 
 
 def run_worker(memory_layer):
-    """
-    Main worker loop. Polls for pending conflicts and reconciles them.
-    """
-    print(f"[worker] Starting. Polling every {POLL_INTERVAL_SECONDS}s...")
+    print(f"[worker] Starting. Polling every {POLL_INTERVAL_SECONDS}s...", flush=True)
 
     while True:
         try:
             pending = memory_layer.get_conflict_history(status="pending")
 
             if pending:
-                print(f"[worker] Found {len(pending)} pending conflict(s).")
+                print(f"[worker] Found {len(pending)} pending conflict(s).", flush=True)
 
             for conflict in pending:
                 try:
                     print(f"[worker] Reconciling: '{conflict['memory_a_content'][:40]}...' "
-                          f"vs '{conflict['memory_b_content'][:40]}...'")
+                          f"vs '{conflict['memory_b_content'][:40]}...'", flush=True)
 
-                    # Rebuild memory dicts for the reconciler
                     memory_a = {
                         "_id":         conflict["memory_a_id"],
                         "content":     conflict["memory_a_content"],
                         "timestamp":   conflict.get("detected_at"),
-                        "confidence":  0.8,   # fallback — memory layer doesn't return this
+                        "confidence":  0.8,
                         "frequency":   0,
                         "memory_type": "semantic",
                     }
@@ -72,27 +70,28 @@ def run_worker(memory_layer):
                         resolved_memory_type="semantic",
                     )
 
-                    print(f"[worker] Resolved → '{result['resolved_content'][:60]}...'")
+                    print(f"[worker] Resolved → '{result['resolved_content'][:60]}...'", flush=True)
 
                 except Exception as e:
-                    print(f"[worker] Error on conflict {conflict.get('_id')}: {e}")
+                    print(f"[worker] Error on conflict {conflict.get('_id')}: {e}", flush=True)
+                    traceback.print_exc()
 
         except Exception as e:
-            print(f"[worker] Poll error: {e}")
+            print(f"[worker] Poll error: {e}", flush=True)
+            traceback.print_exc()
 
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
-if __name__ == "__main__":
-    # Import memory layer — adjust path to match repo structure
-    try:
-        from memory_layer.memories import (
-            get_conflict_history,
-            save_reconciliation_result,
-        )
-        import memory_layer.memories as memory_layer_module
-        run_worker(memory_layer_module)
-    except ImportError as e:
-        print(f"[worker] Could not import memory_layer: {e}")
-        print("Make sure you run this from the project root: python reconciler/background_worker.py")
-        sys.exit(1)
+try:
+    import memory_layer.memories as memory_layer_module
+    print("[worker] memory_layer imported OK", flush=True)
+    run_worker(memory_layer_module)
+except ImportError as e:
+    print(f"[worker] Could not import memory_layer: {e}", flush=True)
+    traceback.print_exc()
+    sys.exit(1)
+except Exception as e:
+    print(f"[worker] Fatal error: {e}", flush=True)
+    traceback.print_exc()
+    sys.exit(1)

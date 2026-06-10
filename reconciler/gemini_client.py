@@ -14,17 +14,27 @@ _client = None
 def get_client():
     global _client
     if _client is None:
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            raise ValueError("GEMINI_API_KEY not set in .env")
-        _client = genai.Client(
-            api_key=api_key,
-            http_options=types.HttpOptions(api_version="v1alpha")
-        )
+        use_vertex = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "").lower() == "true"
+        
+        if use_vertex:
+            _client = genai.Client(
+                vertexai=True,
+                project=os.getenv("GOOGLE_CLOUD_PROJECT"),
+                location=os.getenv("GOOGLE_CLOUD_LOCATION"),
+                http_options=types.HttpOptions(api_version="v1beta1")
+            )
+        else:
+            api_key = os.getenv("GEMINI_API_KEY")
+            if not api_key:
+                raise ValueError("GEMINI_API_KEY not set in .env")
+            _client = genai.Client(
+                api_key=api_key,
+                http_options=types.HttpOptions(api_version="v1alpha")
+            )
     return _client
 
+
 def gemini_call(prompt: str, system: str = None, retries: int = 5) -> str:
-    
     client = get_client()
     full_prompt = f"{system}\n\n{prompt}" if system else prompt
 
@@ -46,6 +56,7 @@ def gemini_call(prompt: str, system: str = None, retries: int = 5) -> str:
             raise
 
     raise ValueError("Max retries exceeded.")
+
 
 def gemini_json_call(prompt: str, system: str = None) -> dict:
     raw = gemini_call(prompt, system)

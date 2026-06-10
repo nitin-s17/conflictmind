@@ -40,17 +40,23 @@ _client = None
 
 def get_genai_client():
     global _client
-
-    # If the client already exists, return
     if _client is not None:
         return _client
     
-    api_key = os.getenv("GEMINI_API_KEY")
-
-    if not api_key:
-        raise ValueError("GEMINI API KEY is not set")
+    use_vertex = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "").lower() == "true"
     
-    _client = genai.Client(api_key=api_key)
+    if use_vertex:
+        _client = genai.Client(
+            vertexai=True,
+            project=os.getenv("GOOGLE_CLOUD_PROJECT"),
+            location=os.getenv("GOOGLE_CLOUD_LOCATION")
+        )
+    else:
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY is not set")
+        _client = genai.Client(api_key=api_key)
+    
     print("Gemini Client Initialized")
     return _client
 
