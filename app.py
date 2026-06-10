@@ -165,7 +165,7 @@ Return NONE or the memory sentence:"""
                 content=extracted,
                 memory_type=memory_type,
                 conversation_id=conversation_id,
-                auto_detect=False
+                auto_detect=True
             )
 
             new_memory_data = {
@@ -186,6 +186,7 @@ Return NONE or the memory sentence:"""
                 "status": "active"
             }
             existing = ml.retrieve_memories(extracted, top_k=20)
+            print(f"[debug] Calling process_new_memory for: '{extracted[:40]}'")
             process_new_memory(new_mem_dict, existing, ml)
 
     except Exception as e:

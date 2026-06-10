@@ -131,6 +131,7 @@ def write_memory(content: str, memory_type: str, conversation_id: str, auto_dete
     
     new_memory_id = str(result.inserted_id)
     print(f"Memory written: {new_memory_id}")
+
     # Check if this new memory conflicts with any existing memories
     if auto_detect:
         conflicts = detect_conflicts(new_memory_id, content, memory_type)
@@ -355,7 +356,7 @@ def detect_conflicts(new_memory_id: str, new_content: str, memory_type: str = No
     """
     Checks if a newly written memory conflicts with any existing memories.
     Uses vector search to find semantically similar memories,
-    then flags pairs above the similarity threshold as potential conflicts.
+    then runs LLM classification to confirm genuine contradictions only.
 
     Args:
         new_memory_id: ID of the newly written memory
@@ -364,7 +365,7 @@ def detect_conflicts(new_memory_id: str, new_content: str, memory_type: str = No
                        (default 0.85 — very similar but not identical)
 
     Returns:
-        list of conflicting memory documents
+        list of conflicting memory documents (contradictory only)
     """
 
     # Convert new content into embeddings
@@ -387,19 +388,69 @@ def detect_conflicts(new_memory_id: str, new_content: str, memory_type: str = No
                 "filter": {"status": "active"}
             }
         },
-        # Add the similarity score as a field
         {
             "$addFields": {
                 "similarity_score": {"$meta": "vectorSearchScore"}
             }
         },
-        # Keep memories above threshold (0.85)
         {
             "$match": {
                 "similarity_score": {"$gte": pipeline_threshold}
             }
         }
     ])
+
+    # Import here to avoid circular imports at module load time
+    # try:
+    #     from reconciler.conflict_classifier import classify_conflict
+    #     classifier_available = True
+    # except ImportError:
+    #     print("[detect_conflicts] Warning: conflict_classifier not available, falling back to similarity only")
+    #     classifier_available = False
+
+    # conflicts = []
+    # for memory in results:
+    #     memory["_id"] = str(memory["_id"])
+
+    #     if memory["_id"] == new_memory_id:
+    #         continue
+
+    #     # Same type → keep at lower threshold (already passed pipeline)
+    #     # Different type → enforce full threshold
+    #     if memory.get("memory_type") != memory_type:
+    #         if memory["similarity_score"] < threshold:
+    #             continue
+
+    #     # Run LLM classification — only flag genuinely contradictory pairs
+    #     if classifier_available:
+    #         try:
+    #             result = classify_conflict(
+    #                 {
+    #                     "content":    new_content,
+    #                     "timestamp":  None,
+    #                     "confidence": 1.0,
+    #                     "frequency":  1,
+    #                 },
+    #                 {
+    #                     "content":    memory["content"],
+    #                     "timestamp":  memory.get("timestamp"),
+    #                     "confidence": float(memory.get("confidence", 0.8)),
+    #                     "frequency":  int(memory.get("frequency", 1)),
+    #                 }
+    #             )
+    #             if result["classification"] == "contradictory" and result["confidence"] >= 0.75:
+    #                 print(f"[detect_conflicts] Conflict confirmed: '{new_content[:40]}' vs '{memory['content'][:40]}'")
+    #                 conflicts.append(memory)
+    #             else:
+    #                 print(f"[detect_conflicts] Skipping ({result['classification']}): '{new_content[:40]}' vs '{memory['content'][:40]}'")
+    #         except Exception as e:
+    #             print(f"[detect_conflicts] classify_conflict error: {e} — skipping pair")
+    #             continue
+    #     else:
+    #         # Fallback: similarity only (original behaviour)
+    #         conflicts.append(memory)
+
+    # return conflicts
 
     conflicts = []
     for memory in results:
@@ -408,13 +459,31 @@ def detect_conflicts(new_memory_id: str, new_content: str, memory_type: str = No
         if memory["_id"] == new_memory_id:
             continue
 
-        # Same type → keep at lower threshold (already passed pipeline)
-        # Different type → enforce full threshold
         if memory.get("memory_type") != memory_type:
             if memory["similarity_score"] < threshold:
                 continue
 
-        conflicts.append(memory)
+        # Very high similarity = almost certainly related, run classifier
+        # But skip classifier for clearly unrelated topics using a hard cutoff
+        if memory["similarity_score"] < 0.90:
+            # Not similar enough to be a real conflict — skip
+            print(f"[detect_conflicts] Below 0.90 threshold, skipping")
+            continue
+
+        # Only run LLM for genuinely high-similarity pairs
+        try:
+            from reconciler.conflict_classifier import classify_conflict
+            result = classify_conflict(
+                {"content": new_content, "timestamp": None, "confidence": 1.0, "frequency": 1},
+                {"content": memory["content"], "timestamp": memory.get("timestamp"), "confidence": float(memory.get("confidence", 0.8)), "frequency": int(memory.get("frequency", 1))}
+            )
+            if result["classification"] == "contradictory" and result["confidence"] >= 0.75:
+                conflicts.append(memory)
+            else:
+                print(f"[detect_conflicts] Skipping ({result['classification']}): '{new_content[:40]}' vs '{memory['content'][:40]}'")
+        except Exception as e:
+            print(f"[detect_conflicts] classify error: {e}")
+            continue
 
     return conflicts
 
@@ -461,21 +530,14 @@ def save_conflict_pair(
         "memory_a_content": memory_a_content,
         "memory_b_content": memory_b_content,
         "similarity_score": similarity_score,
-        "status": "pending",        # pending → resolved after Reconcilers debate
+        "status": "pending",
         "detected_at": datetime.now(timezone.utc),
-        "debate_transcript": None,  
-        "resolved_memory_id": None  # filled in after debate produces new memory
+        "debate_transcript": None,
+        "resolved_memory_id": None
     }
 
     result = conflicts_collection.insert_one(conflict_document)
     conflict_id = str(result.inserted_id)
-
-    # Mark both memories as conflicted so they're flagged in the UI
-    memories_collection = get_memories_collection()
-    memories_collection.update_many(
-        {"_id": {"$in": [ObjectId(memory_a_id), ObjectId(memory_b_id)]}},
-        {"$set": {"status": "conflicted"}}
-    )
 
     print(f"Conflict pair saved: {conflict_id}")
     return conflict_id
@@ -484,7 +546,7 @@ def save_reconciliation_result(
     conflict_pair_id: str,
     debate_transcript: dict,
     resolved_content: str,
-    resolved_memory_type: str = "semantic"  # Default memory type is Semantic, Reconciler can override
+    resolved_memory_type: str = "semantic"
 ) -> str:
     """
     Stores the outcome of Reconciler debate back into Atlas.
@@ -546,12 +608,10 @@ def get_conflict_history(status: str = None, limit: int = 20) -> list[dict]:
 
     conflicts_collection = get_conflict_pairs_collection()
 
-    # Build filter
     query_filter = {}
     if status is not None:
         query_filter["status"] = status
 
-    # Sort by newest conflict first
     results = list(conflicts_collection.find(
         query_filter,
         {"debate_transcript": 0}
