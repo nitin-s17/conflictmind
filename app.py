@@ -67,6 +67,146 @@ def index():
     return render_template("index.html")
 
 
+# @app.route("/chat", methods=["POST"])
+# def chat():
+#     data = request.get_json()
+#     if not data:
+#         return jsonify({"error": "JSON body required"}), 400
+
+#     user_message = data.get("message", "").strip()
+#     conversation_id = data.get("conversation_id", f"web_{int(datetime.now().timestamp())}")
+
+#     if not user_message:
+#         return jsonify({"error": "message is required"}), 400
+
+#     # 1 — Retrieve relevant memories
+#     try:
+#         memories = ml.retrieve_memories(user_message, top_k=5)
+#     except Exception as e:
+#         print(f"[chat] retrieve_memories error: {e}")
+#         memories = []
+
+#     # 2 — Update frequency for recalled memories
+#     for m in memories:
+#         try:
+#             ml.update_memory_frequency(m["_id"])
+#         except Exception:
+#             pass
+
+#     # 3 — Build Gemini system prompt with memory context
+#     if memories:
+#         memory_lines = "\n".join([
+#             f"- {m['content']} (confidence: {m.get('confidence', 0.8):.2f}, recalled {m.get('frequency', 1)}x)"
+#             for m in memories
+#         ])
+#         system_prompt = f"""You are ConflictMind, a personal AI assistant with persistent memory.
+# You genuinely remember things about this user across all conversations.
+
+# What you currently know about this user:
+# {memory_lines}
+
+# Guidelines:
+# - Reference memories naturally when relevant — don't say "I remember you said..."
+# - Be warm, specific and personal. The memory context is your secret weapon.
+# - If the user says something that contradicts what you know, acknowledge both gracefully.
+# - Be concise. Aim for 2-4 sentence responses unless depth is needed."""
+#     else:
+#         system_prompt = """You are ConflictMind, a personal AI assistant with persistent memory.
+# You're just getting to know this user — no prior memories yet.
+# Be warm and curious. Ask a thoughtful follow-up question to start building their profile.
+# Keep your response friendly and short (2-3 sentences)."""
+
+#     # 4 — Call Gemini for the actual response
+#     try:
+#         client = get_gemini()
+#         full_prompt = f"{system_prompt}\n\nUser: {user_message}\n\nConflictMind:"
+#         resp = client.models.generate_content(model="gemini-2.5-flash", contents=full_prompt)
+#         response_text = resp.text.strip()
+#     except Exception as e:
+#         return jsonify({"error": f"Gemini error: {e}"}), 500
+
+#     # 5 — Extract a new memory from the exchange (second Gemini call)
+#     new_memory_data = None
+#     try:
+#         extract_prompt = f"""You extract a single persistent memory from a user conversation.
+
+# User said: "{user_message}"
+# Assistant responded: "{response_text[:400]}"
+
+# Task: Extract ONE reusable fact about the user as a short declarative sentence.
+# - Start with "User"
+# - Only extract meaningful preferences, facts, patterns, or experiences
+# - Do NOT extract greetings, single-word answers, or generic chat
+# - Return EXACTLY the memory sentence, nothing else
+# - If nothing meaningful was learned, return the single word: NONE
+
+# Examples of good outputs:
+# "User works as a product manager at a fintech startup."
+# "User strongly prefers concise technical explanations without filler."
+# "User has been learning guitar for three months."
+
+# Return NONE or the memory sentence:"""
+
+#         extract_resp = client.models.generate_content(
+#             model="gemini-2.5-flash", contents=extract_prompt
+#         )
+#         extracted = extract_resp.text.strip()
+
+#         if extracted and extracted.upper() != "NONE" and len(extracted) > 15 and extracted.startswith("User"):
+#             # Classify memory type
+#             if any(w in extracted.lower() for w in ["always", "usually", "tends to", "habit", "routine", "prefer to", "likes to"]):
+#                 memory_type = "procedural"
+#             elif any(w in extracted.lower() for w in ["last", "yesterday", "ago", "when", "once", "event", "happened"]):
+#                 memory_type = "episodic"
+#             else:
+#                 memory_type = "semantic"
+
+#             memory_id = ml.write_memory(
+#                 content=extracted,
+#                 memory_type=memory_type,
+#                 conversation_id=conversation_id,
+#                 auto_detect=True
+#             )
+
+#             new_memory_data = {
+#                 "id": memory_id,
+#                 "content": extracted,
+#                 "memory_type": memory_type,
+#                 "confidence": 1.0
+#             }
+
+#             # Fire reconciliation in background — never blocks chat response
+#             new_mem_dict = {
+#                 "_id": memory_id,
+#                 "content": extracted,
+#                 "timestamp": datetime.now(timezone.utc),
+#                 "confidence": 1.0,
+#                 "frequency": 1,
+#                 "memory_type": memory_type,
+#                 "status": "active"
+#             }
+#             existing = ml.retrieve_memories(extracted, top_k=20)
+#             print(f"[debug] Calling process_new_memory for: '{extracted[:40]}'")
+#             process_new_memory(new_mem_dict, existing, ml)
+
+#     except Exception as e:
+#         print(f"[chat] memory extraction error: {e}")
+
+#     return jsonify({
+#         "response": response_text,
+#         "memories_used": [
+#             {
+#                 "id": m["_id"],
+#                 "content": m["content"],
+#                 "memory_type": m.get("memory_type", "semantic"),
+#                 "confidence": round(float(m.get("confidence", 0.8)), 2),
+#                 "similarity_score": round(float(m.get("similarity_score", 0)), 3)
+#             }
+#             for m in memories
+#         ],
+#         "new_memory": new_memory_data
+#     })
+
 @app.route("/chat", methods=["POST"])
 def chat():
     data = request.get_json()
@@ -79,118 +219,55 @@ def chat():
     if not user_message:
         return jsonify({"error": "message is required"}), 400
 
-    # 1 — Retrieve relevant memories
+    # Call ADK agent
+    try:
+        import requests as req
+        
+        # First create a session
+        session_id = conversation_id
+        req.post(
+            f"http://localhost:8000/apps/adk_agent/users/user/sessions/{session_id}",
+            json={}
+        )
+        
+        # Then run the agent
+        adk_response = req.post(
+            "http://localhost:8000/run",
+            json={
+                "app_name": "adk_agent",
+                "user_id": "user",
+                "session_id": session_id,
+                "new_message": {
+                    "role": "user",
+                    "parts": [{"text": user_message}]
+                }
+            },
+            timeout=60
+        )
+        adk_data = adk_response.json()
+
+        # Extract text response from ADK events
+        response_text = ""
+        for event in adk_data:
+            if isinstance(event, dict):
+                content = event.get("content", {})
+                if content.get("role") == "model":
+                    parts = content.get("parts", [])
+                    for part in parts:
+                        if "text" in part:
+                            response_text += part["text"]
+
+        if not response_text:
+            response_text = "I'm thinking..."
+
+    except Exception as e:
+        return jsonify({"error": f"ADK agent error: {e}"}), 500
+
+    # Get memories from Atlas for the UI panels
     try:
         memories = ml.retrieve_memories(user_message, top_k=5)
-    except Exception as e:
-        print(f"[chat] retrieve_memories error: {e}")
+    except Exception:
         memories = []
-
-    # 2 — Update frequency for recalled memories
-    for m in memories:
-        try:
-            ml.update_memory_frequency(m["_id"])
-        except Exception:
-            pass
-
-    # 3 — Build Gemini system prompt with memory context
-    if memories:
-        memory_lines = "\n".join([
-            f"- {m['content']} (confidence: {m.get('confidence', 0.8):.2f}, recalled {m.get('frequency', 1)}x)"
-            for m in memories
-        ])
-        system_prompt = f"""You are ConflictMind, a personal AI assistant with persistent memory.
-You genuinely remember things about this user across all conversations.
-
-What you currently know about this user:
-{memory_lines}
-
-Guidelines:
-- Reference memories naturally when relevant — don't say "I remember you said..."
-- Be warm, specific and personal. The memory context is your secret weapon.
-- If the user says something that contradicts what you know, acknowledge both gracefully.
-- Be concise. Aim for 2-4 sentence responses unless depth is needed."""
-    else:
-        system_prompt = """You are ConflictMind, a personal AI assistant with persistent memory.
-You're just getting to know this user — no prior memories yet.
-Be warm and curious. Ask a thoughtful follow-up question to start building their profile.
-Keep your response friendly and short (2-3 sentences)."""
-
-    # 4 — Call Gemini for the actual response
-    try:
-        client = get_gemini()
-        full_prompt = f"{system_prompt}\n\nUser: {user_message}\n\nConflictMind:"
-        resp = client.models.generate_content(model="gemini-2.5-flash", contents=full_prompt)
-        response_text = resp.text.strip()
-    except Exception as e:
-        return jsonify({"error": f"Gemini error: {e}"}), 500
-
-    # 5 — Extract a new memory from the exchange (second Gemini call)
-    new_memory_data = None
-    try:
-        extract_prompt = f"""You extract a single persistent memory from a user conversation.
-
-User said: "{user_message}"
-Assistant responded: "{response_text[:400]}"
-
-Task: Extract ONE reusable fact about the user as a short declarative sentence.
-- Start with "User"
-- Only extract meaningful preferences, facts, patterns, or experiences
-- Do NOT extract greetings, single-word answers, or generic chat
-- Return EXACTLY the memory sentence, nothing else
-- If nothing meaningful was learned, return the single word: NONE
-
-Examples of good outputs:
-"User works as a product manager at a fintech startup."
-"User strongly prefers concise technical explanations without filler."
-"User has been learning guitar for three months."
-
-Return NONE or the memory sentence:"""
-
-        extract_resp = client.models.generate_content(
-            model="gemini-2.5-flash", contents=extract_prompt
-        )
-        extracted = extract_resp.text.strip()
-
-        if extracted and extracted.upper() != "NONE" and len(extracted) > 15 and extracted.startswith("User"):
-            # Classify memory type
-            if any(w in extracted.lower() for w in ["always", "usually", "tends to", "habit", "routine", "prefer to", "likes to"]):
-                memory_type = "procedural"
-            elif any(w in extracted.lower() for w in ["last", "yesterday", "ago", "when", "once", "event", "happened"]):
-                memory_type = "episodic"
-            else:
-                memory_type = "semantic"
-
-            memory_id = ml.write_memory(
-                content=extracted,
-                memory_type=memory_type,
-                conversation_id=conversation_id,
-                auto_detect=True
-            )
-
-            new_memory_data = {
-                "id": memory_id,
-                "content": extracted,
-                "memory_type": memory_type,
-                "confidence": 1.0
-            }
-
-            # Fire reconciliation in background — never blocks chat response
-            new_mem_dict = {
-                "_id": memory_id,
-                "content": extracted,
-                "timestamp": datetime.now(timezone.utc),
-                "confidence": 1.0,
-                "frequency": 1,
-                "memory_type": memory_type,
-                "status": "active"
-            }
-            existing = ml.retrieve_memories(extracted, top_k=20)
-            print(f"[debug] Calling process_new_memory for: '{extracted[:40]}'")
-            process_new_memory(new_mem_dict, existing, ml)
-
-    except Exception as e:
-        print(f"[chat] memory extraction error: {e}")
 
     return jsonify({
         "response": response_text,
@@ -204,9 +281,8 @@ Return NONE or the memory sentence:"""
             }
             for m in memories
         ],
-        "new_memory": new_memory_data
+        "new_memory": None
     })
-
 
 @app.route("/memories")
 def get_memories():
@@ -314,4 +390,4 @@ def get_memory_detail(memory_id):
 if __name__ == "__main__":
     print("\nConflictMind starting...")
     print("    http://localhost:5000\n")
-    app.run(debug=True, port=5000, use_reloader=False)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)), debug=False)
