@@ -99,6 +99,8 @@ def write_memory(content: str, memory_type: str, conversation_id: str, auto_dete
         content: the memory text e.g. "User prefers concise answers"
         memory_type: "semantic", "episodic", or "procedural"
         conversation_id: which conversation this memory came from
+        auto_detect: whether to run conflict detection after writing (default True).
+                     Pass False when writing reconciliation results to prevent cascades.
     
     Returns:
         the ID of the newly created memory as a string
@@ -114,6 +116,37 @@ def write_memory(content: str, memory_type: str, conversation_id: str, auto_dete
     # Gets the embedding for the content and store it
     embedding = get_embedding(content)
 
+    memory_collection = get_memories_collection()
+
+    # Dedup check — if a near-identical memory already exists (score >= 0.97),
+    # just bump its frequency and return the existing ID instead of inserting
+    # a duplicate. This prevents the agent calling /store-memory multiple times
+    # with the same content from flooding the collection.
+    dedup_results = list(memory_collection.aggregate([
+        {
+            "$vectorSearch": {
+                "index": "memory_vector_index",
+                "path": "embedding",
+                "queryVector": embedding,
+                "numCandidates": 10,
+                "limit": 1,
+                "filter": {"status": {"$in": ["active", "resolved"]}}
+            }
+        },
+        {"$addFields": {"similarity_score": {"$meta": "vectorSearchScore"}}},
+        {"$match": {"similarity_score": {"$gte": 0.97}}}
+    ]))
+
+    if dedup_results:
+        existing = dedup_results[0]
+        existing_id = str(existing["_id"])
+        memory_collection.update_one(
+            {"_id": existing["_id"]},
+            {"$inc": {"frequency": 1}}
+        )
+        print(f"Duplicate memory detected (score={existing['similarity_score']:.3f}), returning existing: {existing_id}")
+        return existing_id
+
     memory_document = {
         "content": content,
         "embedding": embedding,
@@ -125,14 +158,14 @@ def write_memory(content: str, memory_type: str, conversation_id: str, auto_dete
         "status": "active"
     }
 
-    # Insert the current memory document into the memory
-    memory_collection = get_memories_collection()
     result = memory_collection.insert_one(memory_document)
-    
     new_memory_id = str(result.inserted_id)
     print(f"Memory written: {new_memory_id}")
 
-    # Check if this new memory conflicts with any existing memories
+    # Check if this new memory conflicts with any existing memories.
+    # auto_detect=False is used by save_reconciliation_result() to prevent
+    # the resolved memory from immediately triggering new conflict pairs
+    # against the memories it was just created from.
     if auto_detect:
         conflicts = detect_conflicts(new_memory_id, content, memory_type)
         for conflict in conflicts:
@@ -400,58 +433,6 @@ def detect_conflicts(new_memory_id: str, new_content: str, memory_type: str = No
         }
     ])
 
-    # Import here to avoid circular imports at module load time
-    # try:
-    #     from reconciler.conflict_classifier import classify_conflict
-    #     classifier_available = True
-    # except ImportError:
-    #     print("[detect_conflicts] Warning: conflict_classifier not available, falling back to similarity only")
-    #     classifier_available = False
-
-    # conflicts = []
-    # for memory in results:
-    #     memory["_id"] = str(memory["_id"])
-
-    #     if memory["_id"] == new_memory_id:
-    #         continue
-
-    #     # Same type → keep at lower threshold (already passed pipeline)
-    #     # Different type → enforce full threshold
-    #     if memory.get("memory_type") != memory_type:
-    #         if memory["similarity_score"] < threshold:
-    #             continue
-
-    #     # Run LLM classification — only flag genuinely contradictory pairs
-    #     if classifier_available:
-    #         try:
-    #             result = classify_conflict(
-    #                 {
-    #                     "content":    new_content,
-    #                     "timestamp":  None,
-    #                     "confidence": 1.0,
-    #                     "frequency":  1,
-    #                 },
-    #                 {
-    #                     "content":    memory["content"],
-    #                     "timestamp":  memory.get("timestamp"),
-    #                     "confidence": float(memory.get("confidence", 0.8)),
-    #                     "frequency":  int(memory.get("frequency", 1)),
-    #                 }
-    #             )
-    #             if result["classification"] == "contradictory" and result["confidence"] >= 0.75:
-    #                 print(f"[detect_conflicts] Conflict confirmed: '{new_content[:40]}' vs '{memory['content'][:40]}'")
-    #                 conflicts.append(memory)
-    #             else:
-    #                 print(f"[detect_conflicts] Skipping ({result['classification']}): '{new_content[:40]}' vs '{memory['content'][:40]}'")
-    #         except Exception as e:
-    #             print(f"[detect_conflicts] classify_conflict error: {e} — skipping pair")
-    #             continue
-    #     else:
-    #         # Fallback: similarity only (original behaviour)
-    #         conflicts.append(memory)
-
-    # return conflicts
-
     conflicts = []
     for memory in results:
         memory["_id"] = str(memory["_id"])
@@ -463,14 +444,7 @@ def detect_conflicts(new_memory_id: str, new_content: str, memory_type: str = No
             if memory["similarity_score"] < threshold:
                 continue
 
-        # Very high similarity = almost certainly related, run classifier
-        # But skip classifier for clearly unrelated topics using a hard cutoff
-        if memory["similarity_score"] < 0.90:
-            # Not similar enough to be a real conflict — skip
-            print(f"[detect_conflicts] Below 0.90 threshold, skipping")
-            continue
-
-        # Only run LLM for genuinely high-similarity pairs
+        # Run LLM classification — only flag genuinely contradictory pairs
         try:
             from reconciler.conflict_classifier import classify_conflict
             result = classify_conflict(
@@ -512,7 +486,7 @@ def save_conflict_pair(
 
     conflicts_collection = get_conflict_pairs_collection()
 
-    # Check if this conflict pair already exists
+    # Check if this conflict pair already exists (either direction)
     existing = conflicts_collection.find_one({
         "$or": [
             {"memory_a_id": memory_a_id, "memory_b_id": memory_b_id},
@@ -552,6 +526,15 @@ def save_reconciliation_result(
     Stores the outcome of Reconciler debate back into Atlas.
     Creates a new unified memory and updates the conflict pair as resolved.
 
+    Order of operations is critical:
+        1. Fetch the conflict pair first (need memory IDs)
+        2. Mark both old memories as resolved BEFORE writing the new one
+           so they are excluded from vector search during conflict detection
+        3. Write the resolved memory with auto_detect=False to prevent
+           the reconciled output from triggering new conflict pairs
+        4. Update resolved_by on both old memories to point to new memory
+        5. Update the conflict pair document as resolved
+
     Args:
         conflict_pair_id:  ID of the conflict pair that was debated
         debate_transcript: the full debate as a dict from Reconciler
@@ -563,15 +546,60 @@ def save_reconciliation_result(
         ID of the newly created unified memory
     """
 
-    # Step 1 — write the new unified memory to Atlas
+    collection = get_conflict_pairs_collection()
+    memory_collection = get_memories_collection()
+
+    # Step 1 — fetch the conflict pair to get both memory IDs.
+    # Accept "processing" status because the worker atomically claims the conflict
+    # (flips "pending" → "processing") before calling this function.
+    conflict_pair = collection.find_one({
+        "_id": ObjectId(conflict_pair_id),
+        "status": {"$in": ["pending", "processing"]}
+    })
+    if not conflict_pair:
+        raise ValueError(f"Conflict pair not found or already resolved: {conflict_pair_id}")
+
+    memory_a_id = conflict_pair["memory_a_id"]
+    memory_b_id = conflict_pair["memory_b_id"]
+
+    # Step 2 — mark both old memories as resolved BEFORE writing the new memory.
+    # This ensures they have status="resolved" and are excluded from the vector
+    # search inside detect_conflicts(), preventing the resolved memory from
+    # immediately re-conflicting with the memories it was created from.
+    # Use a per-conflict sentinel — never a shared placeholder, as concurrent
+    # reconciliations would cross-contaminate each other with update_many.
+    sentinel = f"pending_{conflict_pair_id}"
+    memory_collection.update_one(
+        {"_id": ObjectId(memory_a_id)},
+        {"$set": {"status": "resolved", "resolved_by": sentinel}}
+    )
+    memory_collection.update_one(
+        {"_id": ObjectId(memory_b_id)},
+        {"$set": {"status": "resolved", "resolved_by": sentinel}}
+    )
+    print(f"Marked memories {memory_a_id} and {memory_b_id} as resolved (pre-write)")
+
+    # Step 3 — write the new unified memory with auto_detect=False.
+    # The old memories are already resolved so vector search won't find them,
+    # but auto_detect=False is an extra safeguard against any edge cases.
     resolved_memory_id = write_memory(
         content=resolved_content,
         memory_type=resolved_memory_type,
-        conversation_id=f"reconciliation_{conflict_pair_id}"
+        conversation_id=f"reconciliation_{conflict_pair_id}",
+        auto_detect=False
     )
 
-    # Step 2 — update the conflict pair with debate results
-    collection = get_conflict_pairs_collection()
+    # Step 4 — update resolved_by using exact _id, never update_many with sentinel.
+    memory_collection.update_one(
+        {"_id": ObjectId(memory_a_id)},
+        {"$set": {"resolved_by": resolved_memory_id}}
+    )
+    memory_collection.update_one(
+        {"_id": ObjectId(memory_b_id)},
+        {"$set": {"resolved_by": resolved_memory_id}}
+    )
+
+    # Step 5 — update the conflict pair with debate results and resolved status
     collection.update_one(
         {"_id": ObjectId(conflict_pair_id)},
         {"$set": {
@@ -581,15 +609,6 @@ def save_reconciliation_result(
             "resolved_at": datetime.now(timezone.utc)
         }}
     )
-
-    # Step 3 — fetch the conflict pair to get both memory IDs
-    conflict_pair = collection.find_one({"_id": ObjectId(conflict_pair_id)})
-    if not conflict_pair:
-        raise ValueError(f"Conflict pair not found: {conflict_pair_id}")
-
-    # Step 4 — mark both old conflicting memories as resolved
-    mark_memory_resolved(conflict_pair["memory_a_id"], resolved_memory_id)
-    mark_memory_resolved(conflict_pair["memory_b_id"], resolved_memory_id)
 
     print(f"Reconciliation saved. New memory: {resolved_memory_id}")
     return resolved_memory_id
